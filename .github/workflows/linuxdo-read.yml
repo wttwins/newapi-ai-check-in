@@ -99,7 +99,7 @@ jobs:
 
     - name: 执行阅读帖子
       env:
-        ACCOUNTS: ${{ secrets.ACCOUNTS_LINUX_DO }}
+        ACCOUNTS: ${{ secrets.ACCOUNTS }}
         LINUXDO_BASE_TOPIC_ID: ${{ secrets.LINUXDO_BASE_TOPIC_ID }}
         LINUXDO_MAX_POSTS: ${{ secrets.LINUXDO_MAX_POSTS }}
         DEBUG: ${{ github.event_name == 'workflow_dispatch' && inputs.debug || vars.DEBUG || 'false' }}
