@@ -160,6 +160,10 @@ class LinuxDoReadPosts:
 
         while read_count < max_posts:
             await page.goto(unread_url, wait_until="domcontentloaded")
+            try:
+                await page.wait_for_selector('a[href*="/t/"]', timeout=10000)
+            except Exception:
+                pass
             await page.wait_for_timeout(random.randint(2000, 4000))
 
             topic_urls = await page.evaluate(
@@ -184,6 +188,42 @@ class LinuxDoReadPosts:
             available_urls = [url for url in topic_urls if url not in visited_urls]
             if not available_urls:
                 consecutive_empty_count += 1
+                print(f"ℹ️ {self.masked_username}: Current unread page URL: {page.url}")
+                try:
+                    page_title = await page.title()
+                    print(f"ℹ️ {self.masked_username}: Unread page title: {page_title}")
+                except Exception as e:
+                    print(f"⚠️ {self.masked_username}: Failed to get unread page title: {e}")
+
+                try:
+                    raw_topic_candidates = await page.evaluate(
+                        """() => Array.from(document.querySelectorAll('a[href*="/t/"]')).map(a => a.href || '')"""
+                    )
+                    print(
+                        f"ℹ️ {self.masked_username}: Raw unread topic candidate count: {len(raw_topic_candidates)}"
+                    )
+                    if raw_topic_candidates:
+                        print(
+                            f"ℹ️ {self.masked_username}: Raw unread topic candidates sample: "
+                            f"{raw_topic_candidates[:5]}"
+                        )
+                except Exception as e:
+                    print(f"⚠️ {self.masked_username}: Failed to inspect raw unread topic candidates: {e}")
+
+                print(f"ℹ️ {self.masked_username}: Filtered unread topic URL count: {len(topic_urls)}")
+                if topic_urls:
+                    print(f"ℹ️ {self.masked_username}: Filtered unread topic URLs sample: {topic_urls[:5]}")
+
+                try:
+                    page_text = await page.inner_text("body")
+                    text_preview = " ".join(page_text.split())[:1000]
+                    print(f"ℹ️ {self.masked_username}: Unread page text preview: {text_preview}")
+                except Exception as e:
+                    print(f"⚠️ {self.masked_username}: Failed to read unread page text preview: {e}")
+
+                await save_page_content_to_file(page, "unread_page_no_topic_links", self.username)
+                await take_screenshot(page, "unread_page_no_topic_links", self.username)
+
                 print(
                     f"⚠️ {self.masked_username}: No unread topic links available on /unread "
                     f"(attempt {consecutive_empty_count})"
@@ -244,6 +284,7 @@ class LinuxDoReadPosts:
                 await take_screenshot(page, "unread_topic_read_error", self.username)
 
         return last_topic_url, read_count
+
 
     async def _scroll_to_read(self, page) -> None:
         """自动滚动浏览帖子内容
