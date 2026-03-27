@@ -19,16 +19,9 @@ from utils.mask_utils import mask_username
 # 默认缓存目录，与 checkin.py 保持一致
 DEFAULT_STORAGE_STATE_DIR = "storage-states"
 
-# 帖子起始 ID，从环境变量获取，默认 随机从100000-100200选一个
-# 通过 LINUXDO_BASE_TOPIC_ID 环境变量设置自定义值
-DEFAULT_BASE_TOPIC_ID = random.randint(100000, 100200)
-
 # 默认最大浏览帖子数
 # 通过 LINUXDO_MAX_POSTS 环境变量设置自定义值
 DEFAULT_MAX_POSTS = 100
-
-# 帖子 ID 缓存目录
-TOPIC_ID_CACHE_DIR = "linuxdo_reads"
 
 
 class LinuxDoReadPosts:
@@ -55,10 +48,6 @@ class LinuxDoReadPosts:
         self.username_hash = hashlib.sha256(username.encode("utf-8")).hexdigest()[:8]
 
         os.makedirs(self.storage_state_dir, exist_ok=True)
-        os.makedirs(TOPIC_ID_CACHE_DIR, exist_ok=True)
-
-        # 每个用户独立的 topic_id 缓存文件
-        self.topic_id_cache_file = os.path.join(TOPIC_ID_CACHE_DIR, f"{self.username_hash}_topic_id.txt")
 
     async def _is_logged_in(self, page) -> bool:
         """检查是否已登录
@@ -153,153 +142,108 @@ class LinuxDoReadPosts:
             await take_screenshot(page, "login_error", self.username)
             return False
 
-    def _load_topic_id(self) -> int:
-        """从缓存文件读取上次的 topic_id
-
-        Returns:
-            缓存的 topic_id，如果文件不存在则返回 0
-        """
-        try:
-            if os.path.exists(self.topic_id_cache_file):
-                with open(self.topic_id_cache_file, "r", encoding="utf-8") as f:
-                    content = f.read().strip()
-                    if content:
-                        return int(content)
-                    else:
-                        print(f"⚠️ {self.masked_username}: Failed to load topic ID from cache, content is empty")
-        except (ValueError, IOError) as e:
-            print(f"⚠️ {self.masked_username}: Failed to load topic ID from cache: {e}")
-        return 0
-
-    def _save_topic_id(self, topic_id: int) -> None:
-        """保存 topic_id 到缓存文件
-
-        Args:
-            topic_id: 当前的 topic_id
-        """
-        try:
-            with open(self.topic_id_cache_file, "w", encoding="utf-8") as f:
-                f.write(str(topic_id))
-            print(f"ℹ️ {self.masked_username}: Saved topic ID {topic_id} to cache")
-        except IOError as e:
-            print(f"⚠️ {self.masked_username}: Failed to save topic ID: {e}")
-
-    async def _read_posts(self, page, base_topic_id: int, max_posts: int) -> tuple[int, int]:
-        """浏览帖子
-
-        从 base_topic_id 开始，随机向上加 1-5 打开链接，
-        查找 class timeline-replies 标签判断帖子是否有效。
-        根据剩余可读数量自动滚动浏览。
+    async def _read_posts(self, page, max_posts: int) -> tuple[str, int]:
+        """从 /unread 页面随机选择帖子并阅读
 
         Args:
             page: Camoufox 页面对象
             max_posts: 最大浏览帖子数
 
         Returns:
-            (最后浏览的帖子ID, 实际阅读数量)
+            (最后阅读的帖子URL, 实际阅读数量)
         """
-
-        # 从缓存文件读取上次的 topic_id
-        cached_topic_id = self._load_topic_id()
-
-        # 取环境变量和缓存中的最大值
-        current_topic_id = max(base_topic_id, cached_topic_id)
-        print(
-            f"ℹ️ {self.masked_username}: Starting from topic ID {current_topic_id} "
-            f"(base: {base_topic_id}, cached: {cached_topic_id})"
-        )
-
+        unread_url = "https://linux.do/unread"
         read_count = 0
-        consecutive_invalid_count = 0  # 连续无效帖子计数，用于终止任务
-        jump_invalid_count = 0  # 连续无效帖子计数，用于决定是否跳跃
+        last_topic_url = ""
+        visited_urls = set()
+        consecutive_empty_count = 0
 
         while read_count < max_posts:
-            await page.wait_for_timeout(random.randint(1000, 3000))
+            await page.goto(unread_url, wait_until="domcontentloaded")
+            await page.wait_for_timeout(random.randint(2000, 4000))
 
-            if consecutive_invalid_count > 200:
+            topic_urls = await page.evaluate(
+                """() => {
+                    const anchors = Array.from(document.querySelectorAll('a[href*="/t/"]'));
+                    const urls = [];
+                    for (const a of anchors) {
+                        const href = a.href || '';
+                        if (!href.startsWith('https://linux.do/t/')) continue;
+                        try {
+                            const url = new URL(href);
+                            const parts = url.pathname.split('/').filter(Boolean);
+                            if (parts.length < 3 || parts[0] !== 't') continue;
+                            if (!parts[2].split('').every(ch => ch >= '0' && ch <= '9')) continue;
+                            urls.push(url.origin + url.pathname);
+                        } catch (_) {}
+                    }
+                    return [...new Set(urls)];
+                }"""
+            )
+
+            available_urls = [url for url in topic_urls if url not in visited_urls]
+            if not available_urls:
+                consecutive_empty_count += 1
                 print(
-                    f"⚠️ {self.masked_username}: Consecutive invalid topics exceeded 200, stopping at {current_topic_id}"
+                    f"⚠️ {self.masked_username}: No unread topic links available on /unread "
+                    f"(attempt {consecutive_empty_count})"
                 )
-                break
+                if consecutive_empty_count >= 3:
+                    print(f"ℹ️ {self.masked_username}: No more unread topics, stopping")
+                    break
+                await page.wait_for_timeout(random.randint(2000, 4000))
+                continue
 
-            # 如果连续无效超过5次，跳过5-10个ID
-            if jump_invalid_count >= 5:
-                jump = random.randint(5, 10)
-                current_topic_id += jump
-                print(f"⚠️ {self.masked_username}: Too many invalid topics, jumping ahead by {jump} to {current_topic_id}")
-                jump_invalid_count = 0
-            else:
-                # 随机向上加 1-3
-                current_topic_id += random.randint(1, 3)
-
-            topic_url = f"https://linux.do/t/topic/{current_topic_id}"
+            consecutive_empty_count = 0
+            topic_url = random.choice(available_urls)
+            visited_urls.add(topic_url)
+            last_topic_url = topic_url
 
             try:
-                print(f"ℹ️ {self.masked_username}: Opening topic {current_topic_id}...")
+                print(f"ℹ️ {self.masked_username}: Opening unread topic {topic_url}...")
                 await page.goto(topic_url, wait_until="domcontentloaded")
                 await page.wait_for_timeout(3000)
 
-                # 查找 timeline-replies 标签
                 timeline_element = await page.query_selector(".timeline-replies")
+                if not timeline_element:
+                    print(f"⚠️ {self.masked_username}: Topic page missing timeline, skipping...")
+                    await take_screenshot(page, "unread_topic_missing_timeline", self.username)
+                    continue
 
-                if timeline_element:
-                    # 获取 innerText 解析当前页/总页数，格式为 "当前 / 总数"
-                    inner_text = await timeline_element.inner_text()
-                    print(f"✅ {self.masked_username}: Topic {current_topic_id} - " f"Progress: {inner_text.strip()}")
+                inner_text = await timeline_element.inner_text()
+                print(f"✅ {self.masked_username}: Topic progress: {inner_text.strip()}")
 
-                    # 解析页数信息并滚动浏览
-                    try:
-                        parts = inner_text.strip().split("/")
-                        if len(parts) == 2 and parts[0].strip().isdigit() and parts[1].strip().isdigit():
-                            current_page = int(parts[0].strip())
-                            total_pages = int(parts[1].strip())
+                try:
+                    parts = inner_text.strip().split("/")
+                    if len(parts) == 2 and parts[0].strip().isdigit() and parts[1].strip().isdigit():
+                        current_page = int(parts[0].strip())
+                        total_pages = int(parts[1].strip())
+                        if current_page < total_pages:
+                            print(
+                                f"ℹ️ {self.masked_username}: Scrolling to read "
+                                f"remaining {total_pages - current_page} pages..."
+                            )
+                            await self._scroll_to_read(page)
+                    else:
+                        print(f"⚠️ {self.masked_username}: Timeline read error(content: {inner_text}), continue")
+                        continue
+                except (ValueError, IndexError) as e:
+                    print(f"⚠️ {self.masked_username}: Failed to parse progress: {e}")
+                    continue
 
-                            # 有效帖子，重置无效计数
-                            consecutive_invalid_count = 0
-                            jump_invalid_count = 0
-
-                            if current_page < total_pages:
-                                print(
-                                    f"ℹ️ {self.masked_username}: Scrolling to read "
-                                    f"remaining {total_pages - current_page} pages..."
-                                )
-                                # 自动滚动浏览剩余内容
-                                await self._scroll_to_read(page)
-
-                                read_count += total_pages - current_page
-                                remaining_read_count = max(0, max_posts - read_count)
-                                print(
-                                    f"ℹ️ {self.masked_username}: {read_count} read, "
-                                    f"{remaining_read_count} remaining..."
-                                )
-                        else:
-                            print(f"⚠️ {self.masked_username}: Timeline read error(content: {inner_text}), continue")
-                            consecutive_invalid_count += 1
-                            jump_invalid_count += 1
-                            continue
-                    except (ValueError, IndexError) as e:
-                        print(f"⚠️ {self.masked_username}: Failed to parse progress: {e}")
-                        consecutive_invalid_count += 1
-                        jump_invalid_count += 1
-
-                    # 模拟阅读后等待
-                    await page.wait_for_timeout(random.randint(1000, 2000))
-                else:
-                    print(f"⚠️ {self.masked_username}: Topic {current_topic_id} not found or invalid, skipping...")
-                    await take_screenshot(page, f"topic_not_found_or_invalid_{current_topic_id}", self.username)
-                    consecutive_invalid_count += 1
-                    jump_invalid_count += 1
+                read_count += 1
+                remaining_read_count = max(0, max_posts - read_count)
+                print(
+                    f"ℹ️ {self.masked_username}: {read_count} topic(s) read, "
+                    f"{remaining_read_count} remaining..."
+                )
+                await page.wait_for_timeout(random.randint(1000, 2000))
 
             except Exception as e:
-                print(f"⚠️ {self.masked_username}: Error reading topic {current_topic_id}: {e}")
-                await take_screenshot(page, f"topic_read_error_{current_topic_id}", self.username)
-                consecutive_invalid_count += 1
-                jump_invalid_count += 1
+                print(f"⚠️ {self.masked_username}: Error reading topic {topic_url}: {e}")
+                await take_screenshot(page, "unread_topic_read_error", self.username)
 
-        # 保存当前 topic_id 到缓存
-        self._save_topic_id(current_topic_id)
-
-        return current_topic_id, read_count
+        return last_topic_url, read_count
 
     async def _scroll_to_read(self, page) -> None:
         """自动滚动浏览帖子内容
@@ -364,17 +308,6 @@ class LinuxDoReadPosts:
         # 缓存文件路径，与 checkin.py 保持一致
         cache_file_path = f"{self.storage_state_dir}/linuxdo_{self.username_hash}_storage_state.json"
 
-        # 从环境变量获取起始 ID
-        base_topic_id_str = os.getenv("LINUXDO_BASE_TOPIC_ID", "")
-        try:
-            base_topic_id = int(base_topic_id_str) if base_topic_id_str else DEFAULT_BASE_TOPIC_ID
-        except ValueError:
-            print(
-                f"⚠️ {self.masked_username}: Invalid LINUXDO_BASE_TOPIC_ID={base_topic_id_str}, "
-                f"fallback to default {DEFAULT_BASE_TOPIC_ID}"
-            )
-            base_topic_id = DEFAULT_BASE_TOPIC_ID
-
         # 从环境变量获取最大浏览帖子数，并在上下 50 范围内随机
         max_posts_str = os.getenv("LINUXDO_MAX_POSTS", "")
         try:
@@ -425,12 +358,12 @@ class LinuxDoReadPosts:
 
                 # 浏览帖子
                 print(f"ℹ️ {self.masked_username}: Starting to read posts...")
-                last_topic_id, read_count = await self._read_posts(page, base_topic_id, max_posts)
+                last_topic_url, read_count = await self._read_posts(page, max_posts)
 
                 print(f"✅ {self.masked_username}: Successfully read {read_count} posts")
                 return True, {
                     "read_count": read_count,
-                    "last_topic_id": last_topic_id,
+                    "last_topic_url": last_topic_url,
                 }
 
             except Exception as e:
@@ -583,10 +516,9 @@ async def main():
             if r["success"]:
                 read_count = r["result"].get("read_count", 0)
                 total_read_count += read_count
-                last_topic_id = r["result"].get("last_topic_id", "unknown")
-                topic_url = f"https://linux.do/t/topic/{last_topic_id}"
+                last_topic_url = r["result"].get("last_topic_url", "unknown")
                 notification_lines.append(
-                    f"✅ {masked_username}: Read {read_count} posts ({duration})\n" f"   Last topic: {topic_url}"
+                    f"✅ {masked_username}: Read {read_count} posts ({duration})\n" f"   Last topic: {last_topic_url}"
                 )
             else:
                 error = r["result"].get("error", "Unknown error")

@@ -150,6 +150,13 @@ class LinuxDoSignIn:
                             print(f"ℹ️ {self.account_name}: Starting to sign in linux.do")
 
                             await page.goto("https://linux.do/login", wait_until="domcontentloaded")
+                            print(f"ℹ️ {self.account_name}: Login page loaded, current url: {page.url}")
+                            try:
+                                print(f"ℹ️ {self.account_name}: Login page title: {await page.title()}")
+                            except Exception as title_err:
+                                print(f"⚠️ {self.account_name}: Failed to get login page title: {title_err}")
+                            await save_page_content_to_file(page, "login_page_before_fill", self.account_name, prefix="linuxdo")
+                            await take_screenshot(page, "login_page_before_fill", self.account_name)
 
                             # 检查是否在 Cloudflare 验证页面
                             page_title = await page.title()
@@ -163,8 +170,27 @@ class LinuxDoSignIn:
                                     )
                                     print(f"✅ {self.account_name}: Cloudflare challenge auto-solved")
                                     await page.wait_for_timeout(10000)
+                                    print(f"ℹ️ {self.account_name}: After Cloudflare solve, current url: {page.url}")
+                                    try:
+                                        print(f"ℹ️ {self.account_name}: After Cloudflare solve, page title: {await page.title()}")
+                                    except Exception as title_err:
+                                        print(f"⚠️ {self.account_name}: Failed to get title after Cloudflare solve: {title_err}")
+                                    await save_page_content_to_file(page, "login_page_after_cf", self.account_name, prefix="linuxdo")
+                                    await take_screenshot(page, "login_page_after_cf", self.account_name)
                                 except Exception as solve_err:
                                     print(f"⚠️ {self.account_name}: Auto-solve failed: {solve_err}")
+
+                            login_name_input = await page.query_selector("#login-account-name")
+                            login_password_input = await page.query_selector("#login-account-password")
+                            login_button = await page.query_selector("#login-button")
+                            print(
+                                f"ℹ️ {self.account_name}: Login form presence - "
+                                f"username={bool(login_name_input)}, password={bool(login_password_input)}, button={bool(login_button)}"
+                            )
+                            if not login_name_input or not login_password_input:
+                                print(f"⚠️ {self.account_name}: Login form not ready before fill, saving debug artifacts")
+                                await save_page_content_to_file(page, "login_form_missing_before_fill", self.account_name, prefix="linuxdo")
+                                await take_screenshot(page, "login_form_missing_before_fill", self.account_name)
 
                             await page.fill("#login-account-name", self.username)
                             await page.wait_for_timeout(2000)
