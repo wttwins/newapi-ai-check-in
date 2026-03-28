@@ -69,6 +69,13 @@ class LinuxDoReadPosts:
             current_url = page.url
             print(f"ℹ️ {self.masked_username}: Current URL: {current_url}")
 
+            page_title = ""
+            try:
+                page_title = await page.title()
+                print(f"ℹ️ {self.masked_username}: Page title: {page_title}")
+            except Exception as title_error:
+                print(f"⚠️ {self.masked_username}: Failed to get page title: {title_error}")
+
             header_state = await page.evaluate(
                 """() => {
                     const loginSelectors = [
@@ -106,6 +113,8 @@ class LinuxDoReadPosts:
                 return False
 
             print(f"⚠️ {self.masked_username}: Unable to determine login state from header")
+            await save_page_content_to_file(page, "login_state_undetermined", self.username)
+            await take_screenshot(page, "login_state_undetermined", self.username)
             return False
         except Exception as e:
             print(f"⚠️ {self.masked_username}: Error checking login status: {e}")

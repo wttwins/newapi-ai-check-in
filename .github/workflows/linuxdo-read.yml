@@ -79,6 +79,16 @@ jobs:
         uv run camoufox fetch
         echo "✅ Camoufox 浏览器安装完成"
 
+    - name: 删除 LinuxDo storage state 缓存
+      run: |
+        if (Test-Path "storage-states") {
+          Get-ChildItem -Path storage-states -Filter 'linuxdo_*_storage_state.json' -File -ErrorAction SilentlyContinue |
+            Remove-Item -Force
+          echo "🧹 已删除 LinuxDo storage state 缓存文件"
+        } else {
+          echo "ℹ️ storage-states 目录不存在，跳过删除"
+        }
+
     - name: 恢复登录状态缓存
       uses: actions/cache/restore@v4
       with:

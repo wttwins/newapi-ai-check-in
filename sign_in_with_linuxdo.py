@@ -120,6 +120,10 @@ class LinuxDoSignIn:
                             print(
                                 f"ℹ️ {self.account_name}: redirected to app page {response.url if response else 'N/A'}"
                             )
+                            try:
+                                print(f"ℹ️ {self.account_name}: Login status page title: {await page.title()}")
+                            except Exception as title_err:
+                                print(f"⚠️ {self.account_name}: Failed to get login status page title: {title_err}")
                             await save_page_content_to_file(page, "sign_in_check", self.account_name, prefix="linuxdo")
 
                             # 登录后可能直接跳转回应用页面
@@ -138,11 +142,29 @@ class LinuxDoSignIn:
                                     )
                                 else:
                                     print(f"ℹ️ {self.account_name}: Cache session expired, need to login again")
+                                    await save_page_content_to_file(
+                                        page,
+                                        "sign_in_check_cache_expired",
+                                        self.account_name,
+                                        prefix="linuxdo",
+                                    )
+                                    await take_screenshot(
+                                        page,
+                                        "sign_in_check_cache_expired",
+                                        self.account_name,
+                                    )
                         except Exception as e:
                             print(
                                 f"⚠️ {self.account_name}: Failed to check login status: {e}\n"
                                 f"Current page is: {page.url}"
                             )
+                            await save_page_content_to_file(
+                                page,
+                                "sign_in_check_error",
+                                self.account_name,
+                                prefix="linuxdo",
+                            )
+                            await take_screenshot(page, "sign_in_check_error", self.account_name)
 
                     # 如果未登录，则执行登录流程
                     if not is_logged_in:
