@@ -15,6 +15,7 @@ from camoufox.async_api import AsyncCamoufox
 from utils.browser_utils import take_screenshot, save_page_content_to_file
 from utils.notify import notify
 from utils.mask_utils import mask_username
+from utils.storage_state import ensure_storage_state_from_env, normalize_storage_state_file
 
 # 默认缓存目录，与 checkin.py 保持一致
 DEFAULT_STORAGE_STATE_DIR = "storage-states"
@@ -373,9 +374,17 @@ class LinuxDoReadPosts:
             humanize=True,
             locale="en-US",
         ) as browser:
+            ensure_storage_state_from_env(
+                cache_file_path,
+                self.masked_username,
+                self.username,
+                env_name="STORATE_STATES_LINUXDO",
+            )
+
             # 加载缓存的 storage state（如果存在）
             storage_state = cache_file_path if os.path.exists(cache_file_path) else None
             if storage_state:
+                normalize_storage_state_file(cache_file_path, self.masked_username)
                 print(f"ℹ️ {self.masked_username}: Restoring storage state from cache")
             else:
                 print(f"ℹ️ {self.masked_username}: No cache file found, starting fresh")
