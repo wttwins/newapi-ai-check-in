@@ -53,7 +53,7 @@ class LinuxDoReadPosts:
     async def _is_logged_in(self, page) -> bool:
         """检查是否已登录
 
-        通过访问 https://linux.do/ 后检查 URL 是否跳转到登录页面来判断
+        通过访问 https://linux.do/ 后检查左上角是否有 login 图标或头像图标来判断
 
         Args:
             page: Camoufox 页面对象
@@ -64,21 +64,53 @@ class LinuxDoReadPosts:
         try:
             print(f"ℹ️ {self.masked_username}: Checking login status...")
             await page.goto("https://linux.do/", wait_until="domcontentloaded")
-            await page.wait_for_timeout(3000)  # 等待可能的重定向
+            await page.wait_for_timeout(3000)
 
             current_url = page.url
             print(f"ℹ️ {self.masked_username}: Current URL: {current_url}")
 
-            # 如果跳转到登录页面，说明未登录
+            header_state = await page.evaluate(
+                """() => {
+                    const loginSelectors = [
+                        'a[href="/login"]',
+                        'a[href*="/login"]',
+                        '.login-button',
+                        '.header-dropdown-toggle .d-icon-sign-in-alt',
+                        '.d-header-icons .login-button',
+                    ];
+                    const avatarSelectors = [
+                        '.current-user img.avatar',
+                        '.header-dropdown-toggle img.avatar',
+                        '.d-header-icons .avatar',
+                        '.current-user .avatar',
+                    ];
+
+                    const has_login_icon = loginSelectors.some(selector => document.querySelector(selector));
+                    const has_avatar = avatarSelectors.some(selector => document.querySelector(selector));
+
+                    return { has_login_icon, has_avatar };
+                }"""
+            )
+            print(f"ℹ️ {self.masked_username}: Header state: {header_state}")
+
+            if header_state.get("has_login_icon"):
+                print(f"ℹ️ {self.masked_username}: Login icon is visible, not logged in")
+                return False
+
+            if header_state.get("has_avatar"):
+                print(f"✅ {self.masked_username}: Avatar is visible, already logged in")
+                return True
+
             if current_url.startswith("https://linux.do/login"):
                 print(f"ℹ️ {self.masked_username}: Redirected to login page, not logged in")
                 return False
 
-            print(f"✅ {self.masked_username}: Already logged in")
-            return True
+            print(f"⚠️ {self.masked_username}: Unable to determine login state from header")
+            return False
         except Exception as e:
             print(f"⚠️ {self.masked_username}: Error checking login status: {e}")
             return False
+
 
     async def _do_login(self, page) -> bool:
         """执行登录流程
@@ -162,15 +194,28 @@ class LinuxDoReadPosts:
         while read_count < max_posts:
             await page.goto(unread_url, wait_until="domcontentloaded")
             try:
+                page_title = await page.title()
+            except Exception as e:
+                page_title = ""
+                print(f"⚠️ {self.masked_username}: Failed to get unread page title: {e}")
+
+            if page_title == "Page Not Found - LINUX DO":
+                try:
+                    page_text = await page.inner_text("body")
+                except Exception:
+                    page_text = ""
+                raise RuntimeError(f"Unread page unavailable: {page_title} | {page_text[:200]}")
+
+            try:
                 await page.wait_for_selector('a[href*="/t/"]', timeout=10000)
             except Exception:
                 pass
             await page.wait_for_timeout(random.randint(2000, 4000))
 
-            topic_urls = await page.evaluate(
+            topic_entries = await page.evaluate(
                 """() => {
                     const anchors = Array.from(document.querySelectorAll('a[href*="/t/"]'));
-                    const urls = [];
+                    const entries = [];
                     for (const a of anchors) {
                         const href = a.href || '';
                         if (!href.startsWith('https://linux.do/t/')) continue;
@@ -179,14 +224,50 @@ class LinuxDoReadPosts:
                             const parts = url.pathname.split('/').filter(Boolean);
                             if (parts.length < 3 || parts[0] !== 't') continue;
                             if (!parts[2].split('').every(ch => ch >= '0' && ch <= '9')) continue;
-                            urls.push(url.origin + url.pathname);
+                            const normalizedPath = '/' + parts.slice(0, 3).join('/');
+                            const row = a.closest('tr, .topic-list-item, .topic-list-body');
+                            const cells = row ? Array.from(row.querySelectorAll('td, .num.posts-map.posts.topic-list-data, .posts-map')) : [];
+                            let replyCount = null;
+                            for (const cell of cells) {
+                                const text = (cell.textContent || '').trim().replace(/,/g, '');
+                                if (/^\\d+$/.test(text)) {
+                                    replyCount = parseInt(text, 10);
+                                }
+                            }
+                            entries.push({
+                                url: url.origin + normalizedPath,
+                                replyCount,
+                            });
                         } catch (_) {}
                     }
-                    return [...new Set(urls)];
+                    const deduped = new Map();
+                    for (const entry of entries) {
+                        if (!deduped.has(entry.url)) {
+                            deduped.set(entry.url, entry);
+                        }
+                    }
+                    return Array.from(deduped.values());
                 }"""
             )
 
-            available_urls = [url for url in topic_urls if url not in visited_urls]
+            normalized_topic_entries = []
+            for entry in topic_entries:
+                if isinstance(entry, str):
+                    parts = entry.split('/')
+                    if len(parts) >= 6:
+                        normalized_url = '/'.join(parts[:6])
+                    else:
+                        normalized_url = entry
+                    normalized_topic_entries.append({"url": normalized_url, "replyCount": 0})
+                elif isinstance(entry, dict) and entry.get("url"):
+                    normalized_topic_entries.append(entry)
+
+            filtered_topic_entries = [
+                entry
+                for entry in normalized_topic_entries
+                if entry.get("replyCount") is not None and entry["replyCount"] < 500
+            ]
+            available_urls = [entry["url"] for entry in filtered_topic_entries if entry["url"] not in visited_urls]
             if not available_urls:
                 consecutive_empty_count += 1
                 print(f"ℹ️ {self.masked_username}: Current unread page URL: {page.url}")
@@ -211,9 +292,12 @@ class LinuxDoReadPosts:
                 except Exception as e:
                     print(f"⚠️ {self.masked_username}: Failed to inspect raw unread topic candidates: {e}")
 
-                print(f"ℹ️ {self.masked_username}: Filtered unread topic URL count: {len(topic_urls)}")
-                if topic_urls:
-                    print(f"ℹ️ {self.masked_username}: Filtered unread topic URLs sample: {topic_urls[:5]}")
+                print(f"ℹ️ {self.masked_username}: Filtered unread topic URL count: {len(filtered_topic_entries)}")
+                if filtered_topic_entries:
+                    print(
+                        f"ℹ️ {self.masked_username}: Filtered unread topic entries sample: "
+                        f"{filtered_topic_entries[:5]}"
+                    )
 
                 try:
                     page_text = await page.inner_text("body")
@@ -297,13 +381,15 @@ class LinuxDoReadPosts:
         """
         last_current_page = 0
         last_total_pages = 0
+        stalled_ms = 0
 
         while True:
             # 执行滚动
             await page.evaluate("window.scrollBy(0, window.innerHeight)")
 
             # 每次滚动后等待 1-3 秒，模拟阅读
-            await page.wait_for_timeout(random.randint(1000, 3000))
+            wait_ms = random.randint(1000, 3000)
+            await page.wait_for_timeout(wait_ms)
 
             # 检查 timeline-replies 内容判断是否到底
             timeline_element = await page.query_selector(".timeline-replies")
@@ -318,17 +404,28 @@ class LinuxDoReadPosts:
                     current_page = int(parts[0].strip())
                     total_pages = int(parts[1].strip())
 
-                    # 如果滚动后页数没变，说明已经到底了
-                    if current_page == last_current_page and total_pages == last_total_pages:
-                        print(
-                            f"ℹ️ {self.masked_username}: Page not changing " f"({current_page}/{total_pages}), reached bottom"
-                        )
-                        break
-
-                    # 如果当前页等于总页数，说明到底了
+                    # 只有当前页等于总页数，才说明真正读完了
                     if current_page >= total_pages:
                         print(f"ℹ️ {self.masked_username}: Reached end " f"({current_page}/{total_pages}) after scrolling")
                         break
+
+                    if current_page == last_current_page and total_pages == last_total_pages:
+                        stalled_ms += wait_ms
+                        print(
+                            f"ℹ️ {self.masked_username}: Progress stalled at "
+                            f"({current_page}/{total_pages}), forcing bottom scroll"
+                        )
+                        await page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
+                        bottom_wait_ms = random.randint(1000, 3000)
+                        await page.wait_for_timeout(bottom_wait_ms)
+                        stalled_ms += bottom_wait_ms
+
+                        if stalled_ms >= 30000:
+                            raise RuntimeError(
+                                f"Scroll progress stalled for 30s at {current_page}/{total_pages}"
+                            )
+                    else:
+                        stalled_ms = 0
 
                     # 缓存当前页数
                     last_current_page = current_page
@@ -350,24 +447,19 @@ class LinuxDoReadPosts:
         # 缓存文件路径，与 checkin.py 保持一致
         cache_file_path = f"{self.storage_state_dir}/linuxdo_{self.username_hash}_storage_state.json"
 
-        # 从环境变量获取最大浏览帖子数，并在上下 50 范围内随机
+        # 从环境变量获取最大浏览帖子数
         max_posts_str = os.getenv("LINUXDO_MAX_POSTS", "")
         try:
-            base_max_posts = int(max_posts_str) if max_posts_str else DEFAULT_MAX_POSTS
+            max_posts = int(max_posts_str) if max_posts_str else DEFAULT_MAX_POSTS
         except ValueError:
             print(
                 f"⚠️ {self.masked_username}: Invalid LINUXDO_MAX_POSTS={max_posts_str}, "
                 f"fallback to default {DEFAULT_MAX_POSTS}"
             )
-            base_max_posts = DEFAULT_MAX_POSTS
+            max_posts = DEFAULT_MAX_POSTS
 
-        min_posts = max(10, base_max_posts - 50)
-        max_posts_upper = max(min_posts, base_max_posts + 50)
-        max_posts = random.randint(min_posts, max_posts_upper)
-        print(
-            f"ℹ️ {self.masked_username}: Max posts range {min_posts}-{max_posts_upper}, "
-            f"selected {max_posts}"
-        )
+        max_posts = max(1, max_posts)
+        print(f"ℹ️ {self.masked_username}: Max posts set to {max_posts}")
 
         async with AsyncCamoufox(
             headless=False,
